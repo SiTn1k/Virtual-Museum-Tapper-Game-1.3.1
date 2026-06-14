@@ -104,8 +104,9 @@ export function useGame() {
   const saveRef = useRef<number | null>(null);
   const isInitialized = useRef(false);
 
-  const currentEpoch = getCurrentEpochByLevel(state.level);
-  const epoch = getEpochById(currentEpoch.id);
+  // Use the player's selected epoch (state.epochId) if available
+  // Fall back to level-based epoch only for new players
+  const epoch = getEpochById(state.epochId);
 
   const calculatePassiveXp = useCallback((owned: OwnedGenerator[], level: number): number => {
     const epochData = getEpochById(getCurrentEpochByLevel(level).id);
@@ -320,7 +321,11 @@ export function useGame() {
 
   const switchEpoch = useCallback((epochId: EpochId) => {
     if (!state.unlockedEpochs.includes(epochId)) return;
-    setState(prev => ({ ...prev, epochId }));
+    setState(prev => {
+      const newState = { ...prev, epochId };
+      saveGameState(newState);
+      return newState;
+    });
   }, [state.unlockedEpochs]);
 
   const getOwnedLevel = useCallback((generatorId: string): number => {
