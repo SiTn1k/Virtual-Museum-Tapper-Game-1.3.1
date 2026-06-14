@@ -5,10 +5,11 @@ import { GeneratorShop } from './components/GeneratorShop';
 import { TapUpgrade } from './components/StatsPanel';
 import { GachaModal } from './components/GachaModal';
 import { ReferralsTab } from './components/ReferralsTab';
+import { TutorialModal } from './components/TutorialModal';
 import { EPOCHS, ARTIFACTS, getEpochById } from './data/epochs';
 import { initTelegramMiniApp, hapticImpact, hapticNotification, getTelegramWebApp } from './lib/telegram';
 import { supabase } from './lib/supabase';
-import { Crown, ShoppingBag, Trophy, Gift, Loader2, Users, X, Clock, Shield, Zap, Star, ChevronRight, Wifi, RefreshCw, Timer } from 'lucide-react';
+import { Crown, ShoppingBag, Trophy, Gift, Loader2, Users, X, Clock, Shield, Zap, Star, ChevronRight, Wifi, RefreshCw, Timer, AlertTriangle, BookOpen, Target, Sparkles } from 'lucide-react';
 import type { EpochId } from './types/game';
 
 type Tab = 'shop' | 'epochs' | 'artifacts' | 'referrals' | 'stats' | 'boosters';
@@ -36,6 +37,7 @@ function App() {
     refreshBoosters,
     offlineGains,
     dismissOfflineGains,
+    duplicateTab,
   } = useGame();
 
   const [activeTab, setActiveTab] = useState<Tab>('shop');
@@ -44,11 +46,18 @@ function App() {
   const [syncStatus] = useState<'synced' | 'syncing' | 'error'>('synced');
   const [showError, setShowError] = useState<string | null>(null);
   const [purchasingBooster, setPurchasingBooster] = useState<string | null>(null);
+  const [showTutorial, setShowTutorial] = useState(false);
 
   useEffect(() => {
     const tg = initTelegramMiniApp();
     if (tg) {
       console.log('Telegram WebApp initialized', tg.version, 'User:', tg.initDataUnsafe?.user?.id);
+    }
+
+    // Show tutorial for new players
+    const tutorialSeen = localStorage.getItem('tutorial_seen');
+    if (!tutorialSeen) {
+      setShowTutorial(true);
     }
   }, []);
 
@@ -173,7 +182,7 @@ function App() {
       )}
 
       {/* Offline gains notification */}
-      {offlineGains && !showError && (
+      {offlineGains && !showError && !duplicateTab && (
         <div className="fixed top-0 left-0 right-0 z-40 bg-gray-900 border-b border-yellow-500/40 shadow-lg">
           <div className="flex items-center gap-3 px-4 py-3">
             <Clock className="w-5 h-5 text-yellow-400 shrink-0" />
@@ -188,6 +197,25 @@ function App() {
               className="p-1.5 rounded-lg hover:bg-gray-700 transition-colors"
             >
               <X className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicate tab warning */}
+      {duplicateTab && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4">
+          <div className="bg-gray-900 rounded-2xl p-6 max-w-sm text-center border border yellow-500/40">
+            <AlertTriangle className="w-12 h-12 text-yellow-400 mx-auto mb-4" />
+            <h3 className="text-lg font-bold text-white mb-2">Гру відкрито в іншій вкладці</h3>
+            <p className="text-sm text-gray-400 mb-4">
+              Закрийте цю вкладку і продовжуйте гру в іншому вікні, щоб уникнути втрати прогресу.
+            </p>
+            <button
+              onClick={() => window.close()}
+              className="w-full py-3 bg-yellow-500 text-black font-bold rounded-xl hover:bg-yellow-400 transition-colors"
+            >
+              Закрити цю вкладку
             </button>
           </div>
         </div>
@@ -730,6 +758,16 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Tutorial Modal */}
+      {showTutorial && (
+        <TutorialModal
+          onClose={() => {
+            localStorage.setItem('tutorial_seen', 'true');
+            setShowTutorial(false);
+          }}
+        />
       )}
     </div>
   );
