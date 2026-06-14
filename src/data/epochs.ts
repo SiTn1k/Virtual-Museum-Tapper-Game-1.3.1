@@ -361,3 +361,4 @@ export function getGeneratorCost(generator: Generator, currentLevel: number): nu
 export function getGeneratorProduction(generator: Generator, currentLevel: number): number {
   return generator.baseProduction * currentLevel;
 }
+
