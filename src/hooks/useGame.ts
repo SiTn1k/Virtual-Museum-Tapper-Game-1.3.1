@@ -21,6 +21,8 @@ import type { ActiveBoosters } from '../types/game';
 const XP_PER_LEVEL_MULTIPLIER = 1.5;
 const XP_BASE = 100;
 const SAVE_INTERVAL = 5000;
+const MAX_LEVEL = 999;
+const TAB_ID = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 export interface ArtifactMultipliers {
   xp: number;
@@ -100,9 +102,45 @@ export function useGame() {
   const [userRank, setUserRank] = useState<number | null>(null);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [offlineGains, setOfflineGains] = useState<{ xp: number; currency: number } | null>(null);
+  const [duplicateTab, setDuplicateTab] = useState(false);
   const tickRef = useRef<number | null>(null);
   const saveRef = useRef<number | null>(null);
   const isInitialized = useRef(false);
+
+  // Multiple tab detection
+  useEffect(() => {
+    const STORAGE_KEY = 'game_active_tab';
+
+    // Set this tab as active
+    localStorage.setItem(STORAGE_KEY, TAB_ID);
+
+    const checkTab = () => {
+      const activeTab = localStorage.getItem(STORAGE_KEY);
+      if (activeTab && activeTab !== TAB_ID) {
+        setDuplicateTab(true);
+      }
+    };
+
+    // Check every second if another tab took over
+    const interval = setInterval(checkTab, 1000);
+
+    // Listen for storage events (other tabs writing)
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && e.newValue && e.newValue !== TAB_ID) {
+        setDuplicateTab(true);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('storage', handleStorage);
+      // Clear on unmount
+      if (localStorage.getItem(STORAGE_KEY) === TAB_ID) {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    };
+  }, []);
 
   // Use the player's selected epoch (state.epochId) if available
   // Fall back to level-based epoch only for new players
@@ -186,7 +224,7 @@ export function useGame() {
         let newTotalCurrency = prev.totalCurrencyEarned;
         let newUnlocked = [...prev.unlockedEpochs];
 
-        while (xp >= xpToNext) {
+        while (xp >= xpToNext && newLevel < MAX_LEVEL) {
           xp -= xpToNext;
           newLevel++;
           xpToNext = calculateXpToLevel(newLevel);
@@ -394,5 +432,6 @@ export function useGame() {
     refreshBoosters,
     offlineGains,
     dismissOfflineGains,
+    duplicateTab,
   };
 }
