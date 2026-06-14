@@ -108,12 +108,18 @@ export function useGame() {
   // Fall back to level-based epoch only for new players
   const epoch = getEpochById(state.epochId);
 
-  const calculatePassiveXp = useCallback((owned: OwnedGenerator[], level: number): number => {
-    const epochData = getEpochById(getCurrentEpochByLevel(level).id);
+  const calculatePassiveXp = useCallback((owned: OwnedGenerator[], unlockedEpochs: EpochId[]): number => {
+    // Sum production from all owned generators across all unlocked epochs
     return owned.reduce((total, og) => {
-      const generator = epochData.generators.find(g => g.id === og.generatorId);
-      if (!generator) return total;
-      return total + getGeneratorProduction(generator, og.level);
+      // Search for generator in all unlocked epochs
+      for (const epochId of unlockedEpochs) {
+        const epochData = getEpochById(epochId);
+        const generator = epochData.generators.find(g => g.id === og.generatorId);
+        if (generator) {
+          return total + getGeneratorProduction(generator, og.level);
+        }
+      }
+      return total;
     }, 0);
   }, []);
 
@@ -124,7 +130,7 @@ export function useGame() {
     (async () => {
       const saved = await loadGameState();
       if (saved) {
-        const passiveXp = calculatePassiveXp(saved.ownedGenerators, saved.level);
+        const passiveXp = calculatePassiveXp(saved.ownedGenerators, saved.unlockedEpochs);
 
         // Detect meaningful offline gains to show notification
         const offlineMs = Date.now() - saved.lastSavedAt;
@@ -164,7 +170,7 @@ export function useGame() {
 
     tickRef.current = window.setInterval(() => {
       setState(prev => {
-        const basePassiveXp = calculatePassiveXp(prev.ownedGenerators, prev.level);
+        const basePassiveXp = calculatePassiveXp(prev.ownedGenerators, prev.unlockedEpochs);
         const { passive: passMult, currency: artCurrMult } = getArtifactMultipliers(prev.completedArtifacts || []);
         const { xp: boostXpMult, currency: boostCurrMult } = getBoosterMultipliers(prev.activeBoosters || {});
         const effectivePassiveXp = basePassiveXp * passMult * boostXpMult;
@@ -265,7 +271,7 @@ export function useGame() {
         : [...prev.ownedGenerators, { generatorId, level: 1 }];
 
       const { passive: passMult } = getArtifactMultipliers(prev.completedArtifacts || []);
-      const newPassiveXp = calculatePassiveXp(newOwned, prev.level) * passMult;
+      const newPassiveXp = calculatePassiveXp(newOwned, prev.unlockedEpochs) * passMult;
 
       return {
         ...prev,
