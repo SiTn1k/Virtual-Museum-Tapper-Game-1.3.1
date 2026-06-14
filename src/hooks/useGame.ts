@@ -222,7 +222,8 @@ export function useGame() {
         let xpToNext = prev.xpToNextLevel;
         let newCurrency = prev.currency;
         let newTotalCurrency = prev.totalCurrencyEarned;
-        let newUnlocked = [...prev.unlockedEpochs];
+        // Reuse same array reference if no epoch unlocks happen — avoids cascading re-renders
+        let newUnlocked: string[] | null = null;
 
         while (xp >= xpToNext && newLevel < MAX_LEVEL) {
           xp -= xpToNext;
@@ -233,15 +234,15 @@ export function useGame() {
           newTotalCurrency += levelReward;
 
           EPOCHS.forEach(e => {
-            if (e.unlockLevel === newLevel && !newUnlocked.includes(e.id)) {
-              newUnlocked.push(e.id);
+            if (e.unlockLevel === newLevel && !prev.unlockedEpochs.includes(e.id)) {
+              if (!newUnlocked) newUnlocked = [...prev.unlockedEpochs];
+              if (!newUnlocked.includes(e.id)) newUnlocked.push(e.id);
             }
           });
         }
 
-        // Only auto-switch epoch when a NEW epoch is unlocked via level-up.
-        // Otherwise keep the manually selected epoch (so switchEpoch is not overridden every tick).
-        const newEpochUnlocked = newUnlocked.length > prev.unlockedEpochs.length;
+        const unlockedEpochs = newUnlocked ?? prev.unlockedEpochs;
+        const newEpochUnlocked = newUnlocked !== null;
         const epochId = newEpochUnlocked
           ? getCurrentEpochByLevel(newLevel).id
           : prev.epochId;
@@ -256,7 +257,7 @@ export function useGame() {
           passiveXpPerSecond: effectivePassiveXp,
           currency: newCurrency,
           totalCurrencyEarned: newTotalCurrency,
-          unlockedEpochs: newUnlocked,
+          unlockedEpochs,
         };
       });
     }, 100);
