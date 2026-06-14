@@ -172,6 +172,11 @@ export async function loadGameState(): Promise<GameState | null> {
             .maybeSingle();
 
       if (data) {
+        // Clear stale localStorage cache when loading from DB
+        // This ensures we always use fresh server data in Telegram
+        if (telegramId) {
+          localStorage.removeItem(LOCAL_STORAGE_KEY);
+        }
         return hydrateFromDb(data);
       }
 
