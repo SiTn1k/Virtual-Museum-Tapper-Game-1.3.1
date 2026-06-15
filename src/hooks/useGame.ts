@@ -9,6 +9,14 @@ import {
   getGeneratorProduction,
 } from '../data/epochs';
 import {
+  getTodayDateStr,
+  getYesterdayDateStr,
+  makeFreshDailyTasks,
+  getStreakReward,
+  getTaskById,
+  type StreakReward,
+} from '../data/tasks';
+import {
   saveGameState,
   loadGameState,
   getTelegramUserId,
@@ -92,6 +100,10 @@ const INITIAL_STATE: GameState = {
   referralsCount: 0,
   referralEarnings: 0,
   activeBoosters: {},
+  dailyStreak: 0,
+  bestStreak: 0,
+  lastLoginDate: null,
+  dailyTasksState: null,
 };
 
 export function useGame() {
@@ -103,6 +115,7 @@ export function useGame() {
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [offlineGains, setOfflineGains] = useState<{ xp: number; currency: number } | null>(null);
   const [duplicateTab, setDuplicateTab] = useState(false);
+  const [streakModal, setStreakModal] = useState<{ streak: number; reward: StreakReward } | null>(null);
   const tickRef = useRef<number | null>(null);
   const saveRef = useRef<number | null>(null);
   const isInitialized = useRef(false);
@@ -111,23 +124,29 @@ export function useGame() {
   useEffect(() => {
     const STORAGE_KEY = 'game_active_tab';
 
-    // Set this tab as active
+    // Claim active tab on mount
     localStorage.setItem(STORAGE_KEY, TAB_ID);
 
     const checkTab = () => {
       const activeTab = localStorage.getItem(STORAGE_KEY);
       if (activeTab && activeTab !== TAB_ID) {
         setDuplicateTab(true);
+      } else {
+        // Other tab closed/released — reclaim and clear warning
+        localStorage.setItem(STORAGE_KEY, TAB_ID);
+        setDuplicateTab(false);
       }
     };
 
-    // Check every second if another tab took over
     const interval = setInterval(checkTab, 1000);
 
-    // Listen for storage events (other tabs writing)
+    // Listen for storage events from other tabs
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && e.newValue && e.newValue !== TAB_ID) {
+      if (e.key !== STORAGE_KEY) return;
+      if (e.newValue && e.newValue !== TAB_ID) {
         setDuplicateTab(true);
+      } else {
+        setDuplicateTab(false);
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -135,7 +154,6 @@ export function useGame() {
     return () => {
       clearInterval(interval);
       window.removeEventListener('storage', handleStorage);
-      // Clear on unmount
       if (localStorage.getItem(STORAGE_KEY) === TAB_ID) {
         localStorage.removeItem(STORAGE_KEY);
       }
@@ -170,17 +188,64 @@ export function useGame() {
       if (saved) {
         const passiveXp = calculatePassiveXp(saved.ownedGenerators, saved.unlockedEpochs);
 
-        // Detect meaningful offline gains to show notification
-        const offlineMs = Date.now() - saved.lastSavedAt;
+        // Compute offline gains (storage.ts returns raw values, we apply them here once)
+        const offlineMs = Math.max(0, Date.now() - saved.lastSavedAt);
         const offlineSec = Math.min(offlineMs / 1000, 8 * 3600);
-        const offlineXp = passiveXp * offlineSec;
-        const offlineCurrency = (saved.level * 50) * (offlineSec / 60);
+        let offlineXp = passiveXp * offlineSec;
+        let offlineCurrency = (saved.level * 50) * (offlineSec / 60);
 
-        if (offlineMs > 60_000 && (offlineXp > 100 || offlineCurrency > 10)) {
+        // ── Daily streak check ────────────────────────────────────────
+        const today = getTodayDateStr();
+        const yesterday = getYesterdayDateStr();
+        let newStreak = saved.dailyStreak || 0;
+        let newBestStreak = saved.bestStreak || 0;
+        let newLastLoginDate = saved.lastLoginDate;
+        let isNewDay = false;
+
+        if (saved.lastLoginDate !== today) {
+          isNewDay = true;
+          if (!saved.lastLoginDate) {
+            // Brand new player
+            newStreak = 1;
+          } else if (saved.lastLoginDate === yesterday) {
+            newStreak = (saved.dailyStreak || 0) + 1;
+          } else {
+            // Missed at least one day → reset streak
+            newStreak = 1;
+          }
+          newBestStreak = Math.max(newStreak, saved.bestStreak || 0);
+          newLastLoginDate = today;
+
+          // Add streak reward to offline gains so it's shown in the same batch
+          const reward = getStreakReward(newStreak);
+          offlineXp += reward.xp;
+          offlineCurrency += reward.currency;
+          setStreakModal({ streak: newStreak, reward });
+        }
+
+        // ── Daily tasks: refresh if new day ──────────────────────────
+        let dailyTasksState = saved.dailyTasksState;
+        if (!dailyTasksState || dailyTasksState.date !== today) {
+          dailyTasksState = makeFreshDailyTasks(today);
+        }
+
+        if (offlineMs > 60_000 && (offlineXp > 100 || offlineCurrency > 10) && !isNewDay) {
           setOfflineGains({ xp: offlineXp, currency: offlineCurrency });
         }
 
-        setState({ ...saved, passiveXpPerSecond: passiveXp });
+        setState({
+          ...saved,
+          xp: saved.xp + offlineXp,
+          totalXp: saved.totalXp + offlineXp,
+          currency: saved.currency + offlineCurrency,
+          totalCurrencyEarned: saved.totalCurrencyEarned + offlineCurrency,
+          passiveXpPerSecond: passiveXp,
+          lastSavedAt: Date.now(),
+          dailyStreak: newStreak,
+          bestStreak: newBestStreak,
+          lastLoginDate: newLastLoginDate,
+          dailyTasksState,
+        });
       }
       setIsLoading(false);
     })();
@@ -283,10 +348,24 @@ export function useGame() {
         setTapEvents(te => te.filter(e => e.id !== eventId));
       }, 1000);
 
+      // Track daily task counters for tap and earn_xp types
+      const tasks = prev.dailyTasksState;
+      const updatedTasks = tasks
+        ? {
+            ...tasks,
+            counters: {
+              ...tasks.counters,
+              tap: tasks.counters.tap + 1,
+              earn_xp: tasks.counters.earn_xp + value,
+            },
+          }
+        : tasks;
+
       return {
         ...prev,
         xp: prev.xp + value,
         totalXp: prev.totalXp + value,
+        dailyTasksState: updatedTasks,
       };
     });
   }, []);
@@ -312,11 +391,17 @@ export function useGame() {
       const { passive: passMult } = getArtifactMultipliers(prev.completedArtifacts || []);
       const newPassiveXp = calculatePassiveXp(newOwned, prev.unlockedEpochs) * passMult;
 
+      const tasks = prev.dailyTasksState;
+      const updatedTasks = tasks
+        ? { ...tasks, counters: { ...tasks.counters, buy_generator: tasks.counters.buy_generator + 1 } }
+        : tasks;
+
       return {
         ...prev,
         currency: prev.currency - cost,
         ownedGenerators: newOwned,
         passiveXpPerSecond: newPassiveXp,
+        dailyTasksState: updatedTasks,
       };
     });
 
@@ -324,14 +409,23 @@ export function useGame() {
   }, [epoch.generators, state.currency, state.ownedGenerators, calculatePassiveXp]);
 
   const upgradeTapPower = useCallback(() => {
-    const cost = Math.floor(25 * Math.pow(1.8, state.tapPower - 1));
+    const rawCost = 25 * Math.pow(1.8, state.tapPower - 1);
+    // Guard against floating-point overflow at very high tap power levels
+    const cost = Number.isFinite(rawCost) ? Math.floor(rawCost) : Number.MAX_SAFE_INTEGER;
     if (state.currency < cost) return false;
 
-    setState(prev => ({
-      ...prev,
-      currency: prev.currency - cost,
-      tapPower: prev.tapPower + 1,
-    }));
+    setState(prev => {
+      const tasks = prev.dailyTasksState;
+      const updatedTasks = tasks
+        ? { ...tasks, counters: { ...tasks.counters, upgrade_tap: tasks.counters.upgrade_tap + 1 } }
+        : tasks;
+      return {
+        ...prev,
+        currency: prev.currency - cost,
+        tapPower: prev.tapPower + 1,
+        dailyTasksState: updatedTasks,
+      };
+    });
 
     return true;
   }, [state.currency, state.tapPower]);
@@ -364,6 +458,46 @@ export function useGame() {
     return true;
   }, [state.currency]);
 
+  const recordGachaOpen = useCallback(() => {
+    setState(prev => {
+      const tasks = prev.dailyTasksState;
+      if (!tasks) return prev;
+      return {
+        ...prev,
+        dailyTasksState: {
+          ...tasks,
+          counters: { ...tasks.counters, open_gacha: tasks.counters.open_gacha + 1 },
+        },
+      };
+    });
+  }, []);
+
+  const claimDailyTask = useCallback((taskId: string) => {
+    const task = getTaskById(taskId);
+    if (!task) return;
+
+    setState(prev => {
+      const tasks = prev.dailyTasksState;
+      if (!tasks || tasks.claimed.includes(taskId)) return prev;
+      if (tasks.counters[task.type] < task.target) return prev;
+
+      const reward = task.reward;
+      return {
+        ...prev,
+        currency: prev.currency + (reward.currency || 0),
+        totalCurrencyEarned: prev.totalCurrencyEarned + (reward.currency || 0),
+        xp: prev.xp + (reward.xp || 0),
+        totalXp: prev.totalXp + (reward.xp || 0),
+        dailyTasksState: {
+          ...tasks,
+          claimed: [...tasks.claimed, taskId],
+        },
+      };
+    });
+  }, []);
+
+  const dismissStreakModal = useCallback(() => setStreakModal(null), []);
+
   const switchEpoch = useCallback((epochId: EpochId) => {
     if (!state.unlockedEpochs.includes(epochId)) return;
     setState(prev => {
@@ -372,11 +506,6 @@ export function useGame() {
       return newState;
     });
   }, [state.unlockedEpochs]);
-
-  const getOwnedLevel = useCallback((generatorId: string): number => {
-    const owned = state.ownedGenerators.find(og => og.generatorId === generatorId);
-    return owned?.level || 0;
-  }, [state.ownedGenerators]);
 
   const loadLeaderboard = useCallback(async () => {
     setLeaderboardLoading(true);
@@ -405,7 +534,8 @@ export function useGame() {
     setState(prev => ({ ...prev, activeBoosters: fresh }));
   }, []);
 
-  const tapPowerCost = Math.floor(25 * Math.pow(1.8, state.tapPower - 1));
+  const rawTapCost = 25 * Math.pow(1.8, state.tapPower - 1);
+  const tapPowerCost = Number.isFinite(rawTapCost) ? Math.floor(rawTapCost) : Number.MAX_SAFE_INTEGER;
   const telegramId = getTelegramUserId();
   const artifactMultipliers = getArtifactMultipliers(state.completedArtifacts || []);
   const boosterMultipliers = getBoosterMultipliers(state.activeBoosters || {});
@@ -418,10 +548,11 @@ export function useGame() {
     buyGenerator,
     upgradeTapPower,
     switchEpoch,
-    getOwnedLevel,
     tapPowerCost,
     addArtifactPart,
     deductGachaCost,
+    recordGachaOpen,
+    claimDailyTask,
     isLoading,
     telegramId,
     leaderboard,
@@ -434,5 +565,7 @@ export function useGame() {
     offlineGains,
     dismissOfflineGains,
     duplicateTab,
+    streakModal,
+    dismissStreakModal,
   };
 }
