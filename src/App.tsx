@@ -6,11 +6,14 @@ import { TapUpgrade } from './components/StatsPanel';
 import { GachaModal } from './components/GachaModal';
 import { ReferralsTab } from './components/ReferralsTab';
 import { TutorialModal } from './components/TutorialModal';
+import { DailyStreakModal } from './components/DailyStreakModal';
+import { DailyTasksPanel } from './components/DailyTasksPanel';
 import { EPOCHS, ARTIFACTS, getEpochById } from './data/epochs';
 import { initTelegramMiniApp, hapticImpact, hapticNotification, getTelegramWebApp } from './lib/telegram';
 import { supabase } from './lib/supabase';
-import { Crown, ShoppingBag, Trophy, Gift, Loader2, Users, X, Clock, Shield, Zap, Star, ChevronRight, Wifi, RefreshCw, Timer, AlertTriangle, BookOpen, Target, Sparkles } from 'lucide-react';
+import { Crown, ShoppingBag, Trophy, Gift, Loader2, Users, X, Clock, Shield, Zap, Star, ChevronRight, Wifi, RefreshCw, Timer, AlertTriangle, Sparkles } from 'lucide-react';
 import type { EpochId } from './types/game';
+import { formatNumber } from './lib/utils';
 
 type Tab = 'shop' | 'epochs' | 'artifacts' | 'referrals' | 'stats' | 'boosters';
 
@@ -26,6 +29,8 @@ function App() {
     tapPowerCost,
     addArtifactPart,
     deductGachaCost,
+    recordGachaOpen,
+    claimDailyTask,
     isLoading,
     telegramId,
     leaderboard,
@@ -38,6 +43,8 @@ function App() {
     offlineGains,
     dismissOfflineGains,
     duplicateTab,
+    streakModal,
+    dismissStreakModal,
   } = useGame();
 
   const [activeTab, setActiveTab] = useState<Tab>('shop');
@@ -80,14 +87,6 @@ function App() {
     if (ok) hapticNotification('success');
     return ok;
   };
-
-  const formatNumber = useCallback((n: number) => {
-    if (n >= 1e12) return (n / 1e12).toFixed(1) + 'T';
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return Math.floor(n).toString();
-  }, []);
 
   const completedArtifacts = state.completedArtifacts?.length || 0;
   const effectiveTapPower = Math.max(1, Math.round(state.tapPower * artifactMultipliers.xp));
@@ -205,18 +204,28 @@ function App() {
       {/* Duplicate tab warning */}
       {duplicateTab && (
         <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4">
-          <div className="bg-gray-900 rounded-2xl p-6 max-w-sm text-center border border yellow-500/40">
+          <div className="bg-gray-900 rounded-2xl p-6 max-w-sm w-full text-center border border-yellow-500/40">
             <AlertTriangle className="w-12 h-12 text-yellow-400 mx-auto mb-4" />
             <h3 className="text-lg font-bold text-white mb-2">Гру відкрито в іншій вкладці</h3>
             <p className="text-sm text-gray-400 mb-4">
-              Закрийте цю вкладку і продовжуйте гру в іншому вікні, щоб уникнути втрати прогресу.
+              Гра активна в іншому вікні. Відкрийте лише одну вкладку щоб уникнути втрати прогресу.
             </p>
-            <button
-              onClick={() => window.close()}
-              className="w-full py-3 bg-yellow-500 text-black font-bold rounded-xl hover:bg-yellow-400 transition-colors"
-            >
-              Закрити цю вкладку
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={() => window.close()}
+                className="w-full py-3 bg-yellow-500 text-black font-bold rounded-xl hover:bg-yellow-400 transition-colors"
+              >
+                Закрити цю вкладку
+              </button>
+              <button
+                onClick={() => {
+                  localStorage.setItem('game_active_tab', `tab_${Date.now()}_takeover`);
+                }}
+                className="w-full py-2.5 bg-gray-700 text-gray-200 rounded-xl hover:bg-gray-600 transition-colors text-sm"
+              >
+                Грати тут (може спричинити втрату прогресу)
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -280,6 +289,13 @@ function App() {
         <div className="flex-1 overflow-y-auto overscroll-contain">
           {activeTab === 'shop' && (
             <div>
+              <DailyTasksPanel
+                dailyStreak={state.dailyStreak}
+                bestStreak={state.bestStreak}
+                dailyTasksState={state.dailyTasksState}
+                currencyIcon={epoch.currencyIcon}
+                onClaimTask={claimDailyTask}
+              />
               <TapUpgrade tapPower={state.tapPower} cost={tapPowerCost} currency={state.currency} onUpgrade={handleUpgradeTap} />
               <GeneratorShop
                 epoch={epoch}
@@ -624,6 +640,8 @@ function App() {
                 <StatCard label="Сила тапу" value={`${effectiveTapPower} XP`} />
                 <StatCard label="Валюта" value={`${formatNumber(state.currency)} ${epoch.currencyIcon}`} />
                 <StatCard label="Генераторів" value={state.ownedGenerators.length.toString()} />
+                <StatCard label="🔥 Серія" value={`${state.dailyStreak} ${state.dailyStreak === 1 ? 'день' : state.dailyStreak >= 2 && state.dailyStreak <= 4 ? 'дні' : 'днів'}`} />
+                <StatCard label="Рекорд серії" value={`${state.bestStreak} ${state.bestStreak === 1 ? 'день' : state.bestStreak >= 2 && state.bestStreak <= 4 ? 'дні' : 'днів'}`} />
               </div>
 
               {/* Artifact multipliers summary */}
@@ -710,7 +728,11 @@ function App() {
           artifactParts={state.artifactParts || {}}
           completedArtifacts={state.completedArtifacts || []}
           onClose={() => setShowGacha(false)}
-          onRoll={(cost) => deductGachaCost(cost)}
+          onRoll={(cost) => {
+            const ok = deductGachaCost(cost);
+            if (ok) recordGachaOpen();
+            return ok;
+          }}
           onArtifactDrop={(artifact, isFull) => addArtifactPart(artifact.id, isFull)}
         />
       )}
@@ -767,6 +789,15 @@ function App() {
             localStorage.setItem('tutorial_seen', 'true');
             setShowTutorial(false);
           }}
+        />
+      )}
+
+      {/* Daily Streak Modal — shown once per day on login */}
+      {streakModal && !showTutorial && (
+        <DailyStreakModal
+          streak={streakModal.streak}
+          reward={streakModal.reward}
+          onClose={dismissStreakModal}
         />
       )}
     </div>
