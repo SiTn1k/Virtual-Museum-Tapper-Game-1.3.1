@@ -42,6 +42,22 @@ export interface OwnedGenerator {
   level: number;
 }
 
+// Counters for daily task tracking — reset each UTC day
+export type DailyCounters = {
+  tap: number;
+  buy_generator: number;
+  open_gacha: number;
+  upgrade_tap: number;
+  earn_xp: number; // XP earned from taps today
+};
+
+export interface DailyTasksState {
+  date: string; // 'YYYY-MM-DD' UTC — when the task set was generated
+  taskIds: string[]; // 3 task IDs picked from the pool for this day
+  counters: DailyCounters;
+  claimed: string[]; // task IDs that have been claimed by the player
+}
+
 export interface ActiveBoosters {
   // XP boost x2
   xp_boost_end?: number | null;
@@ -56,6 +72,13 @@ export interface ActiveBoosters {
   legendary_next_gacha?: boolean;
   // Purchase log for refund support
   purchase_log?: Array<{ id: string; charge_id: string; purchased_at: string }>;
+  // Daily streak + tasks — stored here to reuse existing JSONB column
+  _daily?: {
+    streak: number;
+    best: number;
+    lastDate: string | null;
+    tasks: DailyTasksState | null;
+  };
 }
 
 export interface GameState {
@@ -80,6 +103,12 @@ export interface GameState {
   referralEarnings: number;
   // Telegram Stars boosters
   activeBoosters: ActiveBoosters;
+  // Daily streak
+  dailyStreak: number;
+  bestStreak: number;
+  lastLoginDate: string | null; // 'YYYY-MM-DD' UTC
+  // Daily tasks
+  dailyTasksState: DailyTasksState | null;
 }
 
 export interface LeaderboardEntry {
