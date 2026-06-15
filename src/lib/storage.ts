@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { GameState, EpochId, OwnedGenerator, LeaderboardEntry, ActiveBoosters } from '../types/game';
+import { GameState, EpochId, OwnedGenerator, LeaderboardEntry, ActiveBoosters, DailyTasksState } from '../types/game';
 import { getTelegramWebApp } from './telegram';
 
 const LOCAL_STORAGE_KEY = 'ukraine_tap_game_state';
@@ -17,7 +17,9 @@ function calculateXpToLevel(level: number): number {
 // Ensure JSONB values are proper objects/arrays, not strings
 function ensureJson<T>(value: T | string): T {
   if (typeof value === 'string') {
-    try { return JSON.parse(value) as T; } catch { /* fall through */ }
+    try { return JSON.parse(value) as T; } catch (e) {
+      console.warn('ensureJson: failed to parse JSON value', e);
+    }
   }
   return value as T;
 }
@@ -86,6 +88,17 @@ export async function saveGameState(state: GameState): Promise<void> {
   const userInfo = getTelegramUserInfo();
   const deviceId = getDeviceId();
 
+  // Merge daily streak/tasks into active_boosters._daily so we don't need extra DB columns
+  const boostersWithDaily: ActiveBoosters = {
+    ...state.activeBoosters,
+    _daily: {
+      streak: state.dailyStreak || 0,
+      best: state.bestStreak || 0,
+      lastDate: state.lastLoginDate || null,
+      tasks: state.dailyTasksState || null,
+    },
+  };
+
   const payload = {
     epoch_id: state.epochId,
     level: state.level,
@@ -107,7 +120,7 @@ export async function saveGameState(state: GameState): Promise<void> {
     first_name: userInfo?.first_name || null,
     photo_url: userInfo?.photo_url || null,
     last_saved_at: new Date().toISOString(),
-    active_boosters: state.activeBoosters || {},
+    active_boosters: boostersWithDaily,
   };
 
   try {
@@ -238,6 +251,10 @@ export async function loadGameState(): Promise<GameState | null> {
           referralsCount: 0,
           referralEarnings: 0,
           activeBoosters: {},
+          dailyStreak: 0,
+          bestStreak: 0,
+          lastLoginDate: null,
+          dailyTasksState: null,
         };
       }
     } catch (e) {
@@ -251,7 +268,7 @@ export async function loadGameState(): Promise<GameState | null> {
     if (!raw) return null;
 
     const parsed = JSON.parse(raw) as GameState;
-    return applyOfflineGains(parsed);
+    return sanitizeLoadedState(parsed);
   } catch (e) {
     console.error('localStorage load failed:', e);
     return null;
@@ -259,53 +276,72 @@ export async function loadGameState(): Promise<GameState | null> {
 }
 
 function hydrateFromDb(data: Record<string, unknown>): GameState {
-  const now = Date.now();
-  const lastSaved = new Date(data.last_saved_at as string).getTime();
-  const offlineSeconds = Math.min(now - lastSaved, 8 * 60 * 60 * 1000) / 1000;
-  const passiveXps = (data.passive_xp_per_second as number) || 0;
-  const level = data.level as number;
+  // Parse the saved timestamp safely — guard against null/invalid values
+  const rawDate = data.last_saved_at as string | null;
+  const parsedTime = rawDate ? new Date(rawDate).getTime() : NaN;
+  // Preserve the original lastSavedAt so useGame.ts can compute offline gains correctly
+  const lastSavedAt = Number.isFinite(parsedTime) ? parsedTime : Date.now();
+  const level = (data.level as number) || 1;
 
-  const offlineXp = passiveXps * offlineSeconds;
-  const offlineCurrency = (level * 50) * (offlineSeconds / 60);
+  // Extract daily streak/tasks from active_boosters._daily
+  const rawBoosters = (data.active_boosters as ActiveBoosters) || {};
+  const daily = rawBoosters._daily;
+  // Strip _daily from the runtime boosters object (it's a storage concern only)
+  const { _daily: _ignored, ...activeBoosters } = rawBoosters;
+  void _ignored;
 
   return {
     epochId: (data.epoch_id as EpochId) || 'trypillia',
     level,
-    xp: (data.xp as number) + offlineXp,
+    // Raw values — offline gains are applied by useGame.ts after loading
+    xp: (data.xp as number) || 0,
     xpToNextLevel: (data.xp_to_next_level as number) || calculateXpToLevel(level),
-    totalXp: (data.total_xp as number) + offlineXp,
-    currency: (data.currency as number) + offlineCurrency,
-    totalCurrencyEarned: (data.total_currency_earned as number) + offlineCurrency,
-    tapPower: data.tap_power as number,
-    passiveXpPerSecond: passiveXps,
+    totalXp: (data.total_xp as number) || 0,
+    currency: (data.currency as number) || 0,
+    totalCurrencyEarned: (data.total_currency_earned as number) || 0,
+    tapPower: (data.tap_power as number) || 1,
+    passiveXpPerSecond: (data.passive_xp_per_second as number) || 0,
     ownedGenerators: (data.owned_generators as OwnedGenerator[]) || [],
     unlockedEpochs: ((data.unlocked_epochs as string[]) || ['trypillia']) as EpochId[],
     artifactParts: (data.artifact_parts as Record<string, number>) || {},
     completedArtifacts: (data.completed_artifacts as string[]) || [],
-    lastSavedAt: now,
+    lastSavedAt,
     referrerId: sanitizeId(data.referrer_id as number),
     referralsCount: (data.referrals_count as number) || 0,
     referralEarnings: (data.referral_earnings as number) || 0,
-    activeBoosters: (data.active_boosters as ActiveBoosters) || {},
+    activeBoosters,
+    dailyStreak: daily?.streak || 0,
+    bestStreak: daily?.best || 0,
+    lastLoginDate: daily?.lastDate || null,
+    dailyTasksState: (daily?.tasks as DailyTasksState) || null,
   };
 }
 
-function applyOfflineGains(parsed: GameState): GameState {
-  const now = Date.now();
-  const offlineSeconds = Math.min(now - parsed.lastSavedAt, 8 * 60 * 60 * 1000) / 1000;
+// Sanitizes a localStorage-loaded state without applying offline gains.
+// Offline gains are applied by useGame.ts to avoid double-counting.
+function sanitizeLoadedState(parsed: GameState): GameState {
+  // If _daily was stored in activeBoosters (from an old localStorage save), extract it
+  const rawBoosters = parsed.activeBoosters || {};
+  const daily = rawBoosters._daily;
+  const { _daily: _ignored, ...cleanBoosters } = rawBoosters;
+  void _ignored;
+
   return {
     ...parsed,
-    xp: parsed.xp + parsed.passiveXpPerSecond * offlineSeconds,
-    totalXp: parsed.totalXp + parsed.passiveXpPerSecond * offlineSeconds,
-    currency: parsed.currency + (parsed.level * 50) * (offlineSeconds / 60),
-    totalCurrencyEarned: parsed.totalCurrencyEarned + (parsed.level * 50) * (offlineSeconds / 60),
+    // Ensure required fields exist (guards against old/corrupt saves)
     artifactParts: parsed.artifactParts || {},
     completedArtifacts: parsed.completedArtifacts || [],
-    lastSavedAt: now,
     referrerId: sanitizeId(parsed.referrerId),
     referralsCount: parsed.referralsCount || 0,
     referralEarnings: parsed.referralEarnings || 0,
-    activeBoosters: parsed.activeBoosters || {},
+    activeBoosters: cleanBoosters,
+    // Guard against corrupt timestamps
+    lastSavedAt: Number.isFinite(parsed.lastSavedAt) ? parsed.lastSavedAt : Date.now(),
+    // Daily streak/tasks — from parsed fields OR from legacy _daily in boosters
+    dailyStreak: parsed.dailyStreak || daily?.streak || 0,
+    bestStreak: parsed.bestStreak || daily?.best || 0,
+    lastLoginDate: parsed.lastLoginDate || daily?.lastDate || null,
+    dailyTasksState: parsed.dailyTasksState || (daily?.tasks as DailyTasksState | undefined) || null,
   };
 }
 
